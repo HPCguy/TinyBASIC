@@ -301,14 +301,7 @@ void scan_labels()
   label_init();  /* zero all labels */
   temp = prog;   /* save pointer to top of program */
 
-  /* if the first token in the file is a label */
-  get_token();
-  if(token_type==NUMBER) {
-    strcpy(label_table[0].name,token);
-    label_table[0].p=prog;
-  }
-
-  find_eol();
+  /* a label is an integer at the beginning of the line */
   do {
     get_token();
     if(token_type==NUMBER) {
