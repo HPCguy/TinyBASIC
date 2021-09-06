@@ -7,32 +7,35 @@
 #include <ctype.h>
 #include <stdlib.h>
 
-#define NUM_LAB 100
-#define LAB_LEN 10
-#define FOR_NEST 25
-#define SUB_NEST 25
+#define NUM_LAB   100
+#define LAB_LEN   10
+#define LOOP_NEST 25
+#define SUB_NEST  25
 #define PROG_SIZE 10000
 
-#define DELIMITER  1
+#define DELIMITER 1
 #define VARIABLE  2
 #define NUMBER    3
 #define COMMAND   4
-#define STRING   5
-#define QUOTE    6
+#define STRING    5
+#define QUOTE     6
 
-#define PRINT     1
-#define INPUT     2
-#define IF        3
-#define THEN      4
-#define FOR       5
-#define NEXT      6
-#define TO        7
-#define GOTO      8
-#define EOL       9
-#define FINISHED  10
+#define NEXT      1
+#define IF        2
+#define ENDIF     3
+#define FOR       4
+#define TO        5
+#define ELSE      6
+#define BREAK     7
+#define CONTINUE  8
+#define PRINT     9
+#define GOTO      10
 #define GOSUB     11
 #define RETURN    12
-#define END       13
+#define INPUT     13
+#define END       14
+#define EOL       15
+#define FINISHED  16
 
 char *prog;  /* holds expression to be analyzed */
 jmp_buf e_buf; /* hold environment for longjmp() */
@@ -47,16 +50,19 @@ struct commands { /* keyword lookup table */
   char command[20];
   char tok;
 } table[] = { /* Commands must be entered lowercase */
-  "print",  PRINT, /* in this table. */
-  "input",  INPUT,
+  "next",   NEXT, /* in this table. */
   "if",     IF,
-  "then",   THEN,
-  "goto",   GOTO,
+  "endif",  ENDIF,
   "for",    FOR,
-  "next",   NEXT,
   "to",     TO,
+  "else",   ELSE,
+  "break",  BREAK,
+  "continue", CONTINUE,
+  "print",  PRINT,
+  "goto",   GOTO,
   "gosub",  GOSUB,
   "return", RETURN,
+  "input",  INPUT,
   "end",    END,
   "",       END  /* mark end of table */
 };
@@ -65,19 +71,21 @@ char token[80];
 char token_type, tok;
 
 struct label {
-  char name[LAB_LEN];
   char *p;  /* points to place to go in source file*/
+  int name;
 } label_table[NUM_LAB];
 
-struct for_stack {
-  int var; /* counter variable */
+struct loop_stack {
+  int var;     /* counter variable */
   int target;  /* target value */
-  char *loc;
-} fstack[FOR_NEST]; /* stack for FOR/NEXT loop */
+  char *beginLoc; /* top of loop */
+  char *endLoc;
+  char *breakLoc;
+} lstack[LOOP_NEST]; /* stack for FOR/NEXT loop */
 
 char *gstack[SUB_NEST]; /* stack for gosub */
 
-int ftos;  /* index to top of FOR stack */
+int ltos;  /* index to top of FOR stack */
 int gtos;  /* index to top of GOSUB stack */
 
 /**************************************/
@@ -89,12 +97,18 @@ int load_program(char *p, char *fname)
 {
   FILE *fp;
   int i=0;
+  int notInQuote = 1;
 
   if(!(fp=fopen(fname, "rb"))) return 0;
 
   i = 0;
   do {
-    *p++ = getc(fp);
+    *p = getc(fp);
+    if (*p == '"')
+      notInQuote = 1 - notInQuote;
+    if (notInQuote && isalpha(*p)) 
+      *p = tolower(*p);
+    ++p;
     ++i;
   } while(!feof(fp) && i<PROG_SIZE);
   *(p-2) = '\0'; /* null terminate the program */
@@ -114,7 +128,7 @@ void serror(int error)
     "Label table full",
     "duplicate label",
     "undefined label",
-    "THEN expected",
+    "improper loop nest",
     "TO expected",
     "too many nested FOR loops",
     "NEXT without FOR",
@@ -146,11 +160,6 @@ int isdelim(char c)
 int look_up(char *s)
 {
   int i;
-
-  /* convert to lowercase */
-  char *p = s;
-  while(*p)
-     *p++ = tolower(*p);
 
   /* see if token is in table */
   for(i=0; *table[i].command; ++i)
@@ -207,7 +216,7 @@ int get_token()
     return(token_type = NUMBER);
   }
 
-  if(isalpha(*prog)) { /* var or command */
+  if(islower(*prog)) { /* var or command */
     while(!isdelim(*prog))
        *temp++ = *prog++;
     token_type=STRING;
@@ -255,22 +264,22 @@ void label_init()
 {
   int t;
 
-  for(t=0; t<NUM_LAB; ++t) label_table[t].name[0]='\0';
+  for(t=0; t<NUM_LAB; ++t) label_table[t].name=0;
 }
 
 /* Return index of next free position in label array.
    A -1 is returned if the array is full.
    A -2 is returned when duplicate label is found.
 */
-int get_next_label(char *s)
+int get_next_label(int name)
 {
   int t;
 
   for(t=0;t<NUM_LAB;++t) {
-    if(label_table[t].name[0]==0)
+    if(label_table[t].name==0)
        return t;
 
-    if(!strcmp(label_table[t].name,s))
+    if(label_table[t].name == name)
        return -2; /* dup */
   }
 
@@ -281,12 +290,12 @@ int get_next_label(char *s)
    label is not found; otherwise a pointer to the position
    of the label is returned.
 */
-char *find_label(char *s)
+char *find_label(int name)
 {
   int t;
 
   for(t=0; t<NUM_LAB; ++t)
-    if(!strcmp(label_table[t].name,s))
+    if(label_table[t].name == name)
        return label_table[t].p;
 
   return 0; /* error condition */
@@ -305,11 +314,12 @@ void scan_labels()
   do {
     get_token();
     if(token_type==NUMBER) {
-      addr = get_next_label(token);
-      if(addr==-1 || addr==-2) {
+      int name = atoi(token) ;
+      addr = ((name == 0) ? -2 : get_next_label(name));
+      if(addr < 0) {
           (addr==-1) ? serror(5) : serror(6);
       }
-      strcpy(label_table[addr].name, token);
+      label_table[addr].name = name;
       label_table[addr].p = prog;  /* current point in program */
     }
     /* if not on a blank line, find next line */
@@ -326,11 +336,11 @@ void scan_labels()
 /* Find the value of a variable. */
 int find_var(char *s)
 {
-  if(!isalpha(*s)){
+  if(!islower(*s)){
     serror(4); /* not a variable */
     return 0;
   }
-  return variables[toupper(*token)-'A'];
+  return variables[*token-'a'];
 } 
 
 /* Find value of number or variable. */
@@ -480,11 +490,11 @@ void assignment()
 
   /* get the variable name */
   get_token();
-  if(!isalpha(*token)) {
+  if(!islower(*token)) {
     serror(4);
   }
 
-  var = toupper(*token)-'A';
+  var = *token-'a';
 
   /* get the equals sign */
   get_token();
@@ -502,6 +512,27 @@ void assignment()
 /****************************************/
 /********* statement parsers ************/
 /****************************************/
+
+void exit_block(const char *msg, int beginTok, int endTok)
+{
+  int blockScope = 1 ;
+  while (blockScope > 0) {
+    if (tok == endTok) {
+      if (--blockScope == 0) {
+        break ;
+      }
+    }
+    else if (tok == beginTok) {
+      ++blockScope ;
+    }
+    else if (tok == FINISHED) {
+      printf("%s not properly terminated ", msg) ;
+      serror(3) ;
+    }
+    get_token();
+  }
+  /* scanner 'token' now points at endTok, and prog points after endTok */
+}
 
 /************* print **********/
 
@@ -550,14 +581,14 @@ void print()
 
 /************* goto **********/
 
-/* Execute a GOTO statement. */
+/* Execute a computed GOTO statement. */
 void exec_goto()
 {
   char *loc;
+  int value;
 
-  get_token(); /* get label to go to */
-  /* find the location of the label */
-  loc = find_label(token);
+  get_exp(&value);
+  loc = find_label(value);
   if(loc == 0)
     serror(7); /* label not defined */
 
@@ -596,41 +627,60 @@ void exec_if()
       if(x==y) cond=1;
       break;
   }
-  if(cond) { /* is true so process target of IF */
-    get_token();
-    if(tok!=THEN) {
-      serror(8);
-      return;
-    }/* else program execution starts on next line */
+  if(!cond) { /* throw away until ENDIF */
+    int blockScope = 1 ;
+    while (blockScope > 0) {
+      if (tok == ELSE || tok == ENDIF) {
+        if (--blockScope == 0) {
+          break ;
+        }
+      }
+      else if (tok == IF) {
+        ++blockScope ;
+      }
+      else if (tok == FINISHED) {
+        printf("if-statement has no else or endif ") ;
+        serror(3) ;
+      }
+      get_token();
+    }
   }
-  else find_eol(); /* find start of next line */
+}
+
+/*********** loop stack ************/
+
+/* Push function for the FOR/WHILE stack. */
+void lpush(struct loop_stack i)
+{
+   if(++ltos>=LOOP_NEST)
+    serror(10);
+
+  lstack[ltos]=i;
+}
+
+struct loop_stack lpop()
+{
+  if(ltos < 0)
+     serror(11);
+
+  return(lstack[ltos--]);
 }
 
 /*********** for statement ************/
 
-/* Push function for the FOR stack. */
-void fpush(struct for_stack i)
-{
-   if(ftos>FOR_NEST)
-    serror(10);
-
-  fstack[ftos]=i;
-  ftos++;
-}
-
 /* Execute a FOR loop. */
 void exec_for()
 {
-  struct for_stack i;
+  struct loop_stack i;
   int value;
 
   get_token(); /* read the control variable */
-  if(!isalpha(*token)) {
+  if(!islower(*token)) {
     serror(4);
     return;
   }
 
-  i.var=toupper(*token)-'A'; /* save its index */
+  i.var=*token-'a'; /* save its index */
 
   get_token(); /* read the equals sign */
   if(*token != '=') {
@@ -649,36 +699,118 @@ void exec_for()
 
   /* if loop can execute at least once, push info on stack */
   if(value <= i.target) {
-    i.loc = prog;
-    fpush(i);
+    i.beginLoc = prog;
+    i.endLoc = 0;
+    i.breakLoc = 0;
+    lpush(i);
   }
-  else  /* otherwise, skip loop code altogether */
-    while(tok!=NEXT) get_token();
+  else  { /* otherwise, skip loop code altogether */
+    exit_block("For statement", FOR, NEXT);
+#ifdef LOOPELSE
+    /* check for for-else here, and execute */
+    get_token() ;
+    if (tok != ELSE) {
+      putback() ;
+    }
+#endif
+  }
 }
 
 /************ next statement **************/
 
-struct for_stack fpop()
-{
-  if(--ftos < 0)
-     serror(11);
-
-  return(fstack[ftos]);
-}
-
-/* Execute a NEXT statement. */
 void next()
 {
-  struct for_stack i;
+  struct loop_stack *ii = &lstack[ltos];
 
-  i = fpop(); /* read the loop info */
+  if (ltos == -1) {
+    serror(8) ;
+  }
 
-  variables[i.var]++; /* increment control variable */
-  if(variables[i.var]>i.target) return;  /* all done */
-  fpush(i);  /* otherwise, restore the info */
-  prog = i.loc;  /* loop */
+  if (ii->endLoc == 0) {  /* allow for fast break-stmt */
+    ii->endLoc = prog ; /* point to statement after for-else construct */
+#ifdef LOOPELSE
+    get_token() ;
+    if (tok == ELSE) {
+      exit_block("If statement", IF, ENDIF) ;
+    }
+    else {
+      putback() ;
+      ii->endLoc = prog ; /* keep breakLoc and endLoc consistent */
+    }
+#endif
+    ii->breakLoc = prog ; /* point to statement after for-else construct */
+  }
+
+  ++variables[ii->var]; /* increment control variable */
+  if(variables[ii->var] <= ii->target) {
+    prog = ii->beginLoc;  /* loop */
+  }
+  else {
+    lpop() ;
+
+#ifdef LOOPELSE
+    /* check for for-else here, and execute if available */
+    get_token() ;
+    if (tok != ELSE) {
+      putback() ;
+    }
+#endif
+  }
 }
 
+/************ break statement **************/
+
+void exec_break()
+{
+  if (lstack[ltos].breakLoc) {
+    prog = lstack[ltos].breakLoc ; /* points past loop-else construct */
+  }
+  else {
+    exit_block("For statement", FOR, NEXT) ;
+
+#ifdef LOOPELSE
+    /* check for for-else here, and skip it due to break-statement exit */
+    get_token() ;
+    if (tok != ELSE) {
+      putback() ;
+    }
+    else {
+      exit_block("For-else block", IF, ENDIF) ;
+    }
+#endif
+  }
+
+  lpop() ;
+}
+
+/************ continue statement **************/
+
+void exec_continue()
+{
+  struct loop_stack *ii = &lstack[ltos] ;
+
+  ++variables[ii->var]; /* increment control variable */
+  if(variables[ii->var] <= ii->target) {
+    prog = ii->beginLoc;  /* loop */
+  }
+  else {
+    if (ii->endLoc) {
+      prog = ii->endLoc ;
+    }
+    else {
+      exit_block("For statement", FOR, NEXT) ; /* find next-stmt location */
+    }
+
+#ifdef LOOPELSE
+    if (ii->endLoc != ii->breakLoc) { /* An else clause exists */
+      /* Should/can endLoc point past the else? */
+      get_token() ; /* skip past else keyword */
+    }
+#endif
+
+    lpop() ; /* Now, we need to throw away the for loop context */
+  }
+}
 
 /********* input statement *************/
 
@@ -698,7 +830,7 @@ void input()
   else
      printf("? "); /* otherwise, prompt with / */
 
-  var = toupper(*token)-'A'; /* get the input var */
+  var = *token-'a'; /* get the input var */
 
   scanf("%d", &i); /* read input */
 
@@ -719,14 +851,15 @@ void gpush(char *s)
 
 }
 
-/* Execute a GOSUB command. */
+/* Execute a computed GOSUB command. */
 void gosub()
 {
   char *loc;
+  int value;
 
-  get_token();
+  get_exp(&value);
   /* find the label to call */
-  loc = find_label(token);
+  loc = find_label(value);
   if(loc == 0)
     serror(7); /* label not defined */
   else {
@@ -780,8 +913,8 @@ int main(int argc, char *argv[])
 
   prog = p_buf;
   scan_labels(); /* find the labels in the program */
-  ftos = 0; /* initialize the FOR stack index */
-  gtos = 0; /* initialize the GOSUB stack index */
+  ltos = -1; /* initialize the FOR stack index */
+  gtos = 0;  /* initialize the GOSUB stack index */
   do {
     token_type = get_token();
     /* check for assignment statement */
@@ -791,29 +924,40 @@ int main(int argc, char *argv[])
     }
     else /* is command */
       switch(tok) {
+        case NEXT:
+           next();
+           break;
+        case IF:
+           exec_if();
+           break;
+        case ENDIF:
+           break;
+        case FOR:
+           exec_for();
+           break;
+        case ELSE:
+           exit_block("if-statement", IF, ENDIF) ;
+           break;
+        case BREAK:
+           exec_break();
+           break;
+        case CONTINUE:
+           exec_continue();
+           break;
         case PRINT:
            print();
            break;
         case GOTO:
            exec_goto();
            break;
-        case IF:
-           exec_if();
-           break;
-        case FOR:
-           exec_for();
-           break;
-        case NEXT:
-           next();
-           break;
-        case INPUT:
-           input();
-           break;
         case GOSUB:
            gosub();
            break;
         case RETURN:
            greturn();
+           break;
+        case INPUT:
+           input();
            break;
         case END:
            exit(0);
