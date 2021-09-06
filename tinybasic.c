@@ -26,16 +26,18 @@
 #define FOR       4
 #define TO        5
 #define ELSE      6
-#define BREAK     7
-#define CONTINUE  8
-#define PRINT     9
-#define GOTO      10
-#define GOSUB     11
-#define RETURN    12
-#define INPUT     13
-#define END       14
-#define EOL       15
-#define FINISHED  16
+#define WHILE     7
+#define WEND      8
+#define BREAK     9
+#define CONTINUE  10
+#define PRINT     11
+#define GOTO      12
+#define GOSUB     13
+#define RETURN    14
+#define INPUT     15
+#define END       16
+#define EOL       17
+#define FINISHED  18
 
 char *prog;  /* holds expression to be analyzed */
 jmp_buf e_buf; /* hold environment for longjmp() */
@@ -56,6 +58,8 @@ struct commands { /* keyword lookup table */
   "for",    FOR,
   "to",     TO,
   "else",   ELSE,
+  "while",  WHILE,
+  "wend",   WEND,
   "break",  BREAK,
   "continue", CONTINUE,
   "print",  PRINT,
@@ -106,7 +110,7 @@ int load_program(char *p, char *fname)
     *p = getc(fp);
     if (*p == '"')
       notInQuote = 1 - notInQuote;
-    if (notInQuote && isalpha(*p)) 
+    if (notInQuote) 
       *p = tolower(*p);
     ++p;
     ++i;
@@ -722,7 +726,7 @@ void next()
 {
   struct loop_stack *ii = &lstack[ltos];
 
-  if (ltos == -1) {
+  if (ltos == -1 || ii->var == 0xff) {
     serror(8) ;
   }
 
@@ -766,7 +770,21 @@ void exec_break()
     prog = lstack[ltos].breakLoc ; /* points past loop-else construct */
   }
   else {
-    exit_block("For statement", FOR, NEXT) ;
+    const char *msg;
+    int bTok, eTok;
+
+    if (lstack[ltos].var == 0xff) { /* while statement */
+      msg = "While statement" ;
+      bTok = WHILE ;
+      eTok = WEND ;
+    }
+    else { /* for statement */
+      msg = "For statement" ;
+      bTok = FOR ;
+      eTok = NEXT ;
+    }
+
+    exit_block(msg, bTok, eTok) ;
 
 #ifdef LOOPELSE
     /* check for for-else here, and skip it due to break-statement exit */
@@ -789,28 +807,165 @@ void exec_continue()
 {
   struct loop_stack *ii = &lstack[ltos] ;
 
-  ++variables[ii->var]; /* increment control variable */
-  if(variables[ii->var] <= ii->target) {
-    prog = ii->beginLoc;  /* loop */
+  if (ii->var == 0xff) { /* while statement */
+    prog = ii->beginLoc ;
   }
-  else {
-    if (ii->endLoc) {
-      prog = ii->endLoc ;
+  else { /* for statement */
+    ++variables[ii->var]; /* increment control variable */
+    if(variables[ii->var] <= ii->target) {
+      prog = ii->beginLoc;  /* loop */
     }
     else {
-      exit_block("For statement", FOR, NEXT) ; /* find next-stmt location */
-    }
+      if (ii->endLoc) {
+        prog = ii->endLoc ;
+      }
+      else {
+        exit_block("For statement", FOR, NEXT) ; /* find next-stmt location */
+      }
 
 #ifdef LOOPELSE
-    if (ii->endLoc != ii->breakLoc) { /* An else clause exists */
-      /* Should/can endLoc point past the else? */
-      get_token() ; /* skip past else keyword */
-    }
+      if (ii->endLoc != ii->breakLoc) { /* An else clause exists */
+        /* Should/can endLoc point past the else? */
+        get_token() ; /* skip past else keyword */
+      }
 #endif
 
-    lpop() ; /* Now, we need to throw away the for loop context */
+      lpop() ; /* Now, we need to throw away the for loop context */
+    }
   }
 }
+
+/************* while **********/
+
+/* Execute an IF statement. */
+void exec_while()
+{
+  struct loop_stack i ;
+  int pushWhile = 0 ;
+  int x , y;
+  int cond;
+  char op;
+
+  putback() ;
+  if (ltos != -1) {
+    if (lstack[ltos].beginLoc == prog) {
+       /* This while statement is on TOS and active! Keep going! */
+    }
+    else {
+      /* Do not allow direct While-stmt recursion. */
+      /* Alternating between while and next statements, */
+      /* or nesting more than one unique while statements is allowed */
+
+      /* See if this while has been registered */
+      /* at a different nest level. */
+      for (int jj=ltos ; jj >= 0; --jj) {
+        if (lstack[jj].var != 0xff) { /* no danger of direct recursion */
+          break ;
+        }
+        if (lstack[jj].beginLoc == prog) {
+          printf("while statement cannot be directly recursive ") ;
+          serror(3);
+        }
+      }
+      /* First encounter.  Create new while-statement nest */
+      pushWhile = 1 ;
+    }
+  } 
+  else {
+    pushWhile = 1 ;
+  }
+
+  if (pushWhile) {
+    i.beginLoc = prog ;
+    i.endLoc = 0 ;
+    i.breakLoc = 0 ;
+    i.var = 0xff ; /* hack a nonsense var to indicate while-stmt */
+  }
+
+  get_token() ;
+  get_exp(&x); /* get left expression */
+
+  get_token(); /* get the operator */
+  if(!strchr("=<>", *token)) {
+    serror(0); /* not a legal operator */
+    return;
+  }
+  op=*token;
+
+  get_exp(&y); /* get right expression */
+
+  /* determine the outcome */
+  cond = 0;
+  switch(op) {
+    case '<':
+      if(x<y) cond=1;
+      break;
+    case '>':
+      if(x>y) cond=1;
+      break;
+    case '=':
+      if(x==y) cond=1;
+      break;
+  }
+
+  if(!cond) { /* is false so chew everything through wend */
+    if (pushWhile == 0) { /* This while is on the stack top */
+      if (lstack[ltos].endLoc) {  /* go to the else */
+        prog = lstack[ltos].endLoc ;
+      }
+      else {
+        exit_block("While loop", WHILE, WEND) ;
+      }
+
+#ifdef LOOPELSE
+      if (lstack[ltos].endLoc != lstack[ltos].breakLoc) { /* else exists */
+        get_token() ; /* skip else keyword */
+      }
+#endif
+    }
+    else {
+      exit_block("While loop", WHILE, WEND) ;
+#ifdef LOOPELSE
+      get_token() ;
+      if (tok != ELSE) {
+        putback() ;
+      }
+#endif
+    }
+  }
+  else if (pushWhile) {
+    lpush(i) ;
+  }
+}
+
+/************* wend **********/
+
+void exec_wend()
+{
+  struct loop_stack *ii = &lstack[ltos] ;
+  if (ltos == -1 || ii->var != 0xff) { /* check for while stmt */
+    printf("wend found outside of while statement nest ") ;
+    serror(3) ;
+  }
+
+  if (ii->endLoc == 0) {  /* allow for fast break-stmt */
+    ii->endLoc = prog ; /* point to statement after for-else construct */
+#ifdef LOOPELSE
+    get_token() ;
+    if (tok == ELSE) {
+      exit_block("If statement", IF, ENDIF) ;
+    }
+    else {
+      putback() ;
+      ii->endLoc = prog ; /* keep breakLoc and endLoc consistent */
+    }
+#endif
+    ii->breakLoc = prog ; /* point to statement after for-else construct */
+  }
+
+  prog = ii->beginLoc ;
+}
+
 
 /********* input statement *************/
 
@@ -937,6 +1092,12 @@ int main(int argc, char *argv[])
            break;
         case ELSE:
            exit_block("if-statement", IF, ENDIF) ;
+           break;
+        case WHILE:
+           exec_while();
+           break;
+        case WEND:
+           exec_wend();
            break;
         case BREAK:
            exec_break();
