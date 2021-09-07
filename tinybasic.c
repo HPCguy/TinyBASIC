@@ -147,6 +147,8 @@ void serror(int error)
 /************** lexer **************/
 /***********************************/
 
+static char *lastTokPos;
+
 int iswhite(char c)
 {
   return ((c == ' ' || c == '\t') ? 1 : 0) ;
@@ -180,6 +182,7 @@ int get_token()
 
   token_type=0; tok=0;
   temp=token;
+  lastTokPos = prog; /* to capture FINISHED token */
 
   if(*prog == '\0') { /* end of file */
     *token=0;
@@ -188,6 +191,8 @@ int get_token()
   }
 
   while(iswhite(*prog)) ++prog;  /* skip over white space */
+
+  lastTokPos = prog ; /* more aggressive position */
 
   if(*prog == '\n') { /* newline */
     ++prog;
@@ -242,9 +247,7 @@ int get_token()
 /* Return a token to input stream. */
 void putback()
 {
-  char *t = token;
-  while (*t++)
-     --prog;
+  prog = lastTokPos;
 }
 
 /* Find the start of the next line. */
@@ -337,22 +340,12 @@ void scan_labels()
 /**************** Expression parser ****************/
 /***************************************************/
 
-/* Find the value of a variable. */
-int find_var(char *s)
-{
-  if(!islower(*s)){
-    serror(4); /* not a variable */
-    return 0;
-  }
-  return variables[*token-'a'];
-} 
-
 /* Find value of number or variable. */
 void primitive(int *result)
 {
   switch(token_type) {
   case VARIABLE:
-    *result = find_var(token);
+    *result = variables[*token-'a'];
     get_token();
     return;
   case NUMBER:
@@ -369,7 +362,7 @@ void level2(int *result) ;
 /* Process parenthesized expression. */
 void level6(int *result)
 {
-  if((*token == '(') && (token_type == DELIMITER)) {
+  if(*token == '(') {
     get_token();
     level2(result);
     if(*token != ')')
@@ -392,7 +385,7 @@ void level5(int *result)
 {
   char op = 0;
 
-  if((token_type==DELIMITER) && *token=='+' || *token=='-') {
+  if(*token=='+' || *token=='-') {
     op = *token;
     get_token();
   }
@@ -492,12 +485,7 @@ void assignment()
 {
   int var, value;
 
-  /* get the variable name */
-  get_token();
-  if(!islower(*token)) {
-    serror(4);
-  }
-
+  /* token contains variable name */
   var = *token-'a';
 
   /* get the equals sign */
@@ -846,9 +834,8 @@ void exec_while()
   int cond;
   char op;
 
-  putback() ;
   if (ltos != -1) {
-    if (lstack[ltos].beginLoc == prog) {
+    if (lstack[ltos].beginLoc == lastTokPos) {
        /* This while statement is on TOS and active! Keep going! */
     }
     else {
@@ -862,7 +849,7 @@ void exec_while()
         if (lstack[jj].var != 0xff) { /* no danger of direct recursion */
           break ;
         }
-        if (lstack[jj].beginLoc == prog) {
+        if (lstack[jj].beginLoc == lastTokPos) {
           printf("while statement cannot be directly recursive ") ;
           serror(3);
         }
@@ -876,13 +863,12 @@ void exec_while()
   }
 
   if (pushWhile) {
-    i.beginLoc = prog ;
+    i.beginLoc = lastTokPos ;
     i.endLoc = 0 ;
     i.breakLoc = 0 ;
     i.var = 0xff ; /* hack a nonsense var to indicate while-stmt */
   }
 
-  get_token() ;
   get_exp(&x); /* get left expression */
 
   get_token(); /* get the operator */
@@ -1074,7 +1060,6 @@ int main(int argc, char *argv[])
     token_type = get_token();
     /* check for assignment statement */
     if(token_type==VARIABLE) {
-      putback(); /* return the var to the input stream */
       assignment(); /* must be assignment statement */
     }
     else /* is command */
