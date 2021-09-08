@@ -945,6 +945,7 @@ void exec_while()
         get_token() ; /* skip else keyword */
       }
 #endif
+      lpop();
     }
     else {
       exit_block("While loop", WHILE, WEND) ;
