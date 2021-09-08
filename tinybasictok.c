@@ -176,13 +176,7 @@ int get_token()
   if (*prog & 0x80) { /* tokenized action */
     int bytecode = *prog & 0x7f;
 
-    if (islower(bytecode)) {
-       /* var */
-       token_type = VARIABLE;
-       token[0] = bytecode;
-       skip_token();
-    }
-    else if (bytecode < FINISHED) {
+    if (bytecode < FINISHED) {
        /* keyword */
        tok = bytecode;
        if (tok != EOL) {
@@ -190,9 +184,16 @@ int get_token()
          prog += prog[1];
        }
        else { /* '\n' is a very special case */
+         token_type = DELIMITER;
          token[0] = '\n';
-         goto EOL_case;
+         ++prog;
        }
+    }
+    else if (islower(bytecode)) {
+       /* var */
+       token_type = VARIABLE;
+       token[0] = bytecode;
+       skip_token();
     }
     else if (bytecode < FINISHED+11) { /* hack for integers */
       token_type = NUMBER;
@@ -209,10 +210,9 @@ int get_token()
     }
     else {
        /* delimiter */
-       token[0] = bytecode;
-EOL_case:
        token_type = DELIMITER;
-       skip_token();
+       token[0] = bytecode;
+       ++prog;
     }
   }
   else {
@@ -254,7 +254,7 @@ EOL_case:
     }
 
     if(isdigit(*prog)) { /* number */
-      while(!isdelim(*prog))
+      while(isdigit(*prog))
          *temp++ = *prog++;
       *temp = '\0';
       token_value = atoi(token);
@@ -1075,7 +1075,7 @@ int load_program(char *p, char *fname)
   FILE *fp;
   int i=0;
   int notInQuote = 1;
-  int skipWhite  = 0;
+  char lastChar  = 0;
 
   if(!(fp=fopen(fname, "rb"))) return 0;
 
@@ -1084,17 +1084,18 @@ int load_program(char *p, char *fname)
     *p = getc(fp);
     if (notInQuote)  {
       if (iswhite(*p)) { /* only save one whitespace char */
-        if (skipWhite) continue;
-        *p = ' ';
-        skipWhite = 1;
+        if (!isdelim(lastChar))  
+          *p = ' ';
+        else
+          continue;
       }
       else {
         *p = tolower(*p);
-        skipWhite = 0;
       }
     }
     if (*p == '"')
       notInQuote = 1 - notInQuote;
+    lastChar = *p;
     ++p;
     ++i;
   } while(!feof(fp) && i<PROG_SIZE);
@@ -1251,9 +1252,11 @@ int main(int argc, char *argv[])
       }
   } while (tok != FINISHED);
 
+#if 0
   for (int i=0; i<26; ++i) {
     if (variables[i] != 0) {
        printf("%c = %d\n", 'a'+i, variables[i]);
     }
   }
+#endif
 }

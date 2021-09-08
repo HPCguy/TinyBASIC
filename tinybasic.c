@@ -219,7 +219,7 @@ int get_token()
   }
 
   if(isdigit(*prog)) { /* number */
-    while(!isdelim(*prog))
+    while(isdigit(*prog))
        *temp++ = *prog++;
     *temp = '\0';
     return(token_type = NUMBER);

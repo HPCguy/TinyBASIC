@@ -5,4 +5,4 @@ tinybasic.c is an extended basic.
 
 tinybasictok.c adds minimal hacks to pseudo-tokenize.
 
-The "tokenized" version runs about 5x faster. 
+The "tokenized" version runs about 6x faster. 
